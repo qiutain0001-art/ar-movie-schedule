@@ -12,7 +12,6 @@
   }
   #app { width: 100%; height: 100%; position: relative; }
 
-  /* 啟動畫面 */
   #startScreen {
     position: fixed; inset: 0; z-index: 50;
     background: linear-gradient(160deg,#0b0b0f,#1a1a22);
@@ -29,7 +28,6 @@
   }
   #startBtn:active { transform: scale(0.97); }
 
-  /* 掃描提示 */
   #scanHint {
     position: fixed; top: 18px; left: 0; right: 0; z-index: 40;
     text-align: center; color: #fff; font-size: 14px;
@@ -47,13 +45,29 @@
     background: rgba(0,0,0,.6); font-size: 14px;
   }
 
-  /* 診斷面板：顯示目前卡在哪一步，方便排除問題 */
-  #debugPanel {
-    position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 60;
-    background: rgba(0,0,0,.75); color: #7CFC7C; font-size: 11px;
-    font-family: monospace; padding: 8px 10px; border-radius: 8px;
-    max-height: 32vh; overflow-y: auto; line-height: 1.5;
-    white-space: pre-wrap; display: none;
+  /* 校正面板開關按鈕 */
+  #panelToggle {
+    position: fixed; top: 14px; right: 14px; z-index: 60;
+    width: 40px; height: 40px; border-radius: 999px; border: none;
+    background: rgba(0,0,0,.55); color: #fff; font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* 位置/大小校正面板 */
+  #adjustPanel {
+    position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 55;
+    background: rgba(20,20,24,.88); color: #fff; border-radius: 14px;
+    padding: 14px 16px 10px; font-size: 13px; display: none;
+    backdrop-filter: blur(6px);
+  }
+  #adjustPanel h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+  .adjRow { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .adjRow label { width: 64px; flex-shrink: 0; opacity: .85; }
+  .adjRow input[type="range"] { flex: 1; }
+  .adjRow span { width: 46px; text-align: right; font-variant-numeric: tabular-nums; opacity: .8; }
+  #resetBtn {
+    width: 100%; padding: 8px; margin-top: 4px; border: none; border-radius: 8px;
+    background: #444; color: #fff; font-size: 13px;
   }
 </style>
 </head>
@@ -73,7 +87,31 @@
 
 <div id="loading"><span>載入中…</span></div>
 
-<div id="debugPanel"></div>
+<button id="panelToggle" style="display:none;">⚙️</button>
+<div id="adjustPanel">
+  <h3>位置 / 大小校正</h3>
+  <div class="adjRow">
+    <label>左右 X</label>
+    <input type="range" id="adjX" min="-2" max="2" step="0.01" value="0" />
+    <span id="valX">0.00</span>
+  </div>
+  <div class="adjRow">
+    <label>上下 Y</label>
+    <input type="range" id="adjY" min="-1" max="3" step="0.01" value="0.65" />
+    <span id="valY">0.65</span>
+  </div>
+  <div class="adjRow">
+    <label>深淺 Z</label>
+    <input type="range" id="adjZ" min="-2" max="2" step="0.01" value="0" />
+    <span id="valZ">0.00</span>
+  </div>
+  <div class="adjRow">
+    <label>大小</label>
+    <input type="range" id="adjScale" min="0.2" max="3" step="0.01" value="1" />
+    <span id="valScale">1.00</span>
+  </div>
+  <button id="resetBtn">重設為預設值</button>
+</div>
 
 <script type="importmap">
 {
@@ -89,11 +127,6 @@
 import * as THREE from "three";
 import { MindARThree } from "mindar-image-three";
 
-/* ---------------------------------------------------------
-   1) 綠幕去背 Shader（Chroma Key）
-   在 GPU 上即時把影片中的綠色背景轉成透明，
-   不需要事先把影片重新輸出成含 Alpha 的檔案。
---------------------------------------------------------- */
 const chromaKeyVertexShader = `
   varying vec2 vUv;
   void main() {
@@ -105,10 +138,10 @@ const chromaKeyVertexShader = `
 const chromaKeyFragmentShader = `
   precision highp float;
   uniform sampler2D map;
-  uniform vec3 keyColor;     // 要去除的綠幕顏色
-  uniform float similarity;  // 判定為背景的門檻（越大去除範圍越大）
-  uniform float smoothness;  // 邊緣柔化程度
-  uniform float spill;       // 綠色溢色抑制強度
+  uniform vec3 keyColor;
+  uniform float similarity;
+  uniform float smoothness;
+  uniform float spill;
   varying vec2 vUv;
 
   vec2 RGBtoUV(vec3 rgb) {
@@ -126,7 +159,6 @@ const chromaKeyFragmentShader = `
 
     float alpha = smoothstep(similarity, similarity + smoothness, d);
 
-    // 抑制邊緣殘留的綠色溢色
     float maxrb = max(tex.r, tex.b);
     vec3 color = tex.rgb;
     float g = min(color.g, mix(color.g, maxrb, spill));
@@ -141,7 +173,7 @@ function createChromaKeyMaterial(videoTexture) {
     uniforms: {
       map: { value: videoTexture },
       keyColor: { value: new THREE.Color(0x00ff00) },
-      similarity: { value: 0.28 },   // 可依實際綠幕微調 0.2~0.4
+      similarity: { value: 0.28 },
       smoothness: { value: 0.10 },
       spill: { value: 0.6 },
     },
@@ -152,67 +184,71 @@ function createChromaKeyMaterial(videoTexture) {
   });
 }
 
-/* ---------------------------------------------------------
-   2) 建立 MindAR 場景
---------------------------------------------------------- */
 const startScreen = document.getElementById("startScreen");
 const startBtn = document.getElementById("startBtn");
 const scanHint = document.getElementById("scanHint");
 const loadingEl = document.getElementById("loading");
+const panelToggle = document.getElementById("panelToggle");
+const adjustPanel = document.getElementById("adjustPanel");
+const adjX = document.getElementById("adjX");
+const adjY = document.getElementById("adjY");
+const adjZ = document.getElementById("adjZ");
+const adjScale = document.getElementById("adjScale");
+const valX = document.getElementById("valX");
+const valY = document.getElementById("valY");
+const valZ = document.getElementById("valZ");
+const valScale = document.getElementById("valScale");
+const resetBtn = document.getElementById("resetBtn");
+
+const DEFAULTS = { x: 0, y: 0.65, z: 0, scale: 1 };
 
 let mindarThree, video, renderer, scene, camera, anchor, plane;
 let started = false;
 
-/* ---------------------------------------------------------
-   診斷面板：把每一步驟印在畫面上，方便手機上不用接電腦
-   也能看出到底卡在哪個步驟
---------------------------------------------------------- */
-const debugPanel = document.getElementById("debugPanel");
-function debugLog(msg) {
-  debugPanel.style.display = "block";
-  const time = new Date().toLocaleTimeString();
-  debugPanel.textContent += `[${time}] ${msg}\n`;
-  debugPanel.scrollTop = debugPanel.scrollHeight;
-  console.log(msg);
-}
-
-window.addEventListener("error", (e) => {
-  debugLog("❌ 全域錯誤: " + (e.message || e));
+panelToggle.addEventListener("click", () => {
+  adjustPanel.style.display = adjustPanel.style.display === "block" ? "none" : "block";
 });
-window.addEventListener("unhandledrejection", (e) => {
-  debugLog("❌ 未捕捉的 Promise 錯誤: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+
+function applyTransform() {
+  if (!plane) return;
+  plane.position.set(parseFloat(adjX.value), parseFloat(adjY.value), parseFloat(adjZ.value));
+  plane.scale.setScalar(parseFloat(adjScale.value));
+  valX.textContent = parseFloat(adjX.value).toFixed(2);
+  valY.textContent = parseFloat(adjY.value).toFixed(2);
+  valZ.textContent = parseFloat(adjZ.value).toFixed(2);
+  valScale.textContent = parseFloat(adjScale.value).toFixed(2);
+}
+[adjX, adjY, adjZ, adjScale].forEach((el) => el.addEventListener("input", applyTransform));
+
+resetBtn.addEventListener("click", () => {
+  adjX.value = DEFAULTS.x;
+  adjY.value = DEFAULTS.y;
+  adjZ.value = DEFAULTS.z;
+  adjScale.value = DEFAULTS.scale;
+  applyTransform();
 });
 
 async function initAR() {
   loadingEl.style.display = "flex";
-  debugLog("① 開始初始化 initAR()");
 
-  debugLog("② 建立 MindARThree 物件…");
   mindarThree = new MindARThree({
     container: document.querySelector("#app"),
-    imageTargetSrc: "./AUDIO_ENTRANCE.mind", // 沿用原始 target 檔名，未更改
+    imageTargetSrc: "./AUDIO_ENTRANCE.mind",
     uiScanning: false,
     uiLoading: false,
   });
-  debugLog("✅ MindARThree 物件建立完成");
 
   ({ renderer, scene, camera } = mindarThree);
 
-  anchor = mindarThree.addAnchor(0); // 對應 .mind 內第 0 個目標圖像
-  debugLog("✅ Anchor(0) 建立完成");
+  anchor = mindarThree.addAnchor(0);
 
-  // 影片素材（綠幕）
   video = document.createElement("video");
-  video.src = "./cinema-rolling-carousel.mp4"; // 沿用原始檔名，未更改
+  video.src = "./cinema-rolling-carousel.mp4";
   video.crossOrigin = "anonymous";
   video.loop = true;
-  video.muted = true;               // 手機瀏覽器自動播放限制，靜音才可自動播
+  video.muted = true;
   video.playsInline = true;
   video.setAttribute("webkit-playsinline", "true");
-
-  video.addEventListener("loadeddata", () => debugLog("✅ 影片資料已載入 (loadeddata)"));
-  video.addEventListener("error", () => debugLog("❌ 影片載入失敗: " + (video.error ? video.error.code : "未知錯誤")));
-  video.addEventListener("canplay", () => debugLog("✅ 影片可播放 (canplay)"));
 
   const videoTexture = new THREE.VideoTexture(video);
   videoTexture.minFilter = THREE.LinearFilter;
@@ -221,35 +257,29 @@ async function initAR() {
 
   const material = createChromaKeyMaterial(videoTexture);
 
-  // 影片為 1080x1920 直式，依比例建立平面，寬度設為 1（單位＝目標圖像寬度）
   const aspect = 1080 / 1920;
-  const planeHeight = 1.4;              // 可依海報大小調整
+  const planeHeight = 1.4;
   const planeWidth = planeHeight * aspect;
   const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
 
   plane = new THREE.Mesh(geometry, material);
-  plane.position.set(0, planeHeight / 2 - 0.05, 0); // 往上浮出海報上方
   anchor.group.add(plane);
-  debugLog("✅ 影片平面已加入 anchor");
+  applyTransform();
 
   anchor.onTargetFound = () => {
-    debugLog("🎯 偵測到目標圖像 (onTargetFound)");
     scanHint.style.display = "none";
     video.currentTime = 0;
-    video.play().then(() => debugLog("▶️ 影片開始播放")).catch((e) => debugLog("❌ 影片播放失敗: " + e.message));
+    video.play().catch(() => {});
   };
   anchor.onTargetLost = () => {
-    debugLog("📤 目標圖像離開視野 (onTargetLost)");
     scanHint.style.display = "block";
     video.pause();
   };
 
-  debugLog("③ 呼叫 mindarThree.start()（會請求相機權限、下載追蹤模型）…");
   await mindarThree.start();
-  debugLog("✅ mindarThree.start() 完成，相機與追蹤系統已就緒");
-
   loadingEl.style.display = "none";
   scanHint.style.display = "block";
+  panelToggle.style.display = "flex";
 
   renderer.setAnimationLoop(() => {
     if (video.readyState >= video.HAVE_CURRENT_DATA) {
@@ -257,7 +287,6 @@ async function initAR() {
     }
     renderer.render(scene, camera);
   });
-  debugLog("④ 渲染迴圈已啟動，畫面應該持續更新中");
 }
 
 startBtn.addEventListener("click", async () => {
@@ -268,7 +297,6 @@ startBtn.addEventListener("click", async () => {
     await initAR();
   } catch (err) {
     console.error(err);
-    debugLog("❌ initAR() 拋出例外: " + err.message);
     alert("啟動相機失敗，請確認已允許相機權限，並使用 https 或 localhost 開啟本頁。\n" + err.message);
     startScreen.style.display = "flex";
     started = false;
