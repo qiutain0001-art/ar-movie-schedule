@@ -46,6 +46,15 @@
     align-items: center; justify-content: center; color: #fff;
     background: rgba(0,0,0,.6); font-size: 14px;
   }
+
+  /* 診斷面板：顯示目前卡在哪一步，方便排除問題 */
+  #debugPanel {
+    position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 60;
+    background: rgba(0,0,0,.75); color: #7CFC7C; font-size: 11px;
+    font-family: monospace; padding: 8px 10px; border-radius: 8px;
+    max-height: 32vh; overflow-y: auto; line-height: 1.5;
+    white-space: pre-wrap; display: none;
+  }
 </style>
 </head>
 <body>
@@ -63,6 +72,8 @@
 </div>
 
 <div id="loading"><span>載入中…</span></div>
+
+<div id="debugPanel"></div>
 
 <script type="importmap">
 {
@@ -152,19 +163,43 @@ const loadingEl = document.getElementById("loading");
 let mindarThree, video, renderer, scene, camera, anchor, plane;
 let started = false;
 
+/* ---------------------------------------------------------
+   診斷面板：把每一步驟印在畫面上，方便手機上不用接電腦
+   也能看出到底卡在哪個步驟
+--------------------------------------------------------- */
+const debugPanel = document.getElementById("debugPanel");
+function debugLog(msg) {
+  debugPanel.style.display = "block";
+  const time = new Date().toLocaleTimeString();
+  debugPanel.textContent += `[${time}] ${msg}\n`;
+  debugPanel.scrollTop = debugPanel.scrollHeight;
+  console.log(msg);
+}
+
+window.addEventListener("error", (e) => {
+  debugLog("❌ 全域錯誤: " + (e.message || e));
+});
+window.addEventListener("unhandledrejection", (e) => {
+  debugLog("❌ 未捕捉的 Promise 錯誤: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+});
+
 async function initAR() {
   loadingEl.style.display = "flex";
+  debugLog("① 開始初始化 initAR()");
 
+  debugLog("② 建立 MindARThree 物件…");
   mindarThree = new MindARThree({
     container: document.querySelector("#app"),
     imageTargetSrc: "./assets/AUDIO_ENTRANCE.mind", // 沿用原始 target 檔名，未更改
     uiScanning: false,
     uiLoading: false,
   });
+  debugLog("✅ MindARThree 物件建立完成");
 
   ({ renderer, scene, camera } = mindarThree);
 
   anchor = mindarThree.addAnchor(0); // 對應 .mind 內第 0 個目標圖像
+  debugLog("✅ Anchor(0) 建立完成");
 
   // 影片素材（綠幕）
   video = document.createElement("video");
@@ -174,6 +209,10 @@ async function initAR() {
   video.muted = true;               // 手機瀏覽器自動播放限制，靜音才可自動播
   video.playsInline = true;
   video.setAttribute("webkit-playsinline", "true");
+
+  video.addEventListener("loadeddata", () => debugLog("✅ 影片資料已載入 (loadeddata)"));
+  video.addEventListener("error", () => debugLog("❌ 影片載入失敗: " + (video.error ? video.error.code : "未知錯誤")));
+  video.addEventListener("canplay", () => debugLog("✅ 影片可播放 (canplay)"));
 
   const videoTexture = new THREE.VideoTexture(video);
   videoTexture.minFilter = THREE.LinearFilter;
@@ -191,18 +230,24 @@ async function initAR() {
   plane = new THREE.Mesh(geometry, material);
   plane.position.set(0, planeHeight / 2 - 0.05, 0); // 往上浮出海報上方
   anchor.group.add(plane);
+  debugLog("✅ 影片平面已加入 anchor");
 
   anchor.onTargetFound = () => {
+    debugLog("🎯 偵測到目標圖像 (onTargetFound)");
     scanHint.style.display = "none";
     video.currentTime = 0;
-    video.play().catch(() => {});
+    video.play().then(() => debugLog("▶️ 影片開始播放")).catch((e) => debugLog("❌ 影片播放失敗: " + e.message));
   };
   anchor.onTargetLost = () => {
+    debugLog("📤 目標圖像離開視野 (onTargetLost)");
     scanHint.style.display = "block";
     video.pause();
   };
 
+  debugLog("③ 呼叫 mindarThree.start()（會請求相機權限、下載追蹤模型）…");
   await mindarThree.start();
+  debugLog("✅ mindarThree.start() 完成，相機與追蹤系統已就緒");
+
   loadingEl.style.display = "none";
   scanHint.style.display = "block";
 
@@ -212,6 +257,7 @@ async function initAR() {
     }
     renderer.render(scene, camera);
   });
+  debugLog("④ 渲染迴圈已啟動，畫面應該持續更新中");
 }
 
 startBtn.addEventListener("click", async () => {
@@ -222,6 +268,7 @@ startBtn.addEventListener("click", async () => {
     await initAR();
   } catch (err) {
     console.error(err);
+    debugLog("❌ initAR() 拋出例外: " + err.message);
     alert("啟動相機失敗，請確認已允許相機權限，並使用 https 或 localhost 開啟本頁。\n" + err.message);
     startScreen.style.display = "flex";
     started = false;
