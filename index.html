@@ -67,17 +67,16 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
   }
 }
 </script>
 
-<!-- MindAR image (three.js 版本) -->
-<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
-
 <script type="module">
 import * as THREE from "three";
+import { MindARThree } from "mindar-image-three";
 
 /* ---------------------------------------------------------
    1) 綠幕去背 Shader（Chroma Key）
@@ -156,7 +155,7 @@ let started = false;
 async function initAR() {
   loadingEl.style.display = "flex";
 
-  mindarThree = new window.MINDAR.IMAGE.MindARThree({
+  mindarThree = new MindARThree({
     container: document.querySelector("#app"),
     imageTargetSrc: "./assets/AUDIO_ENTRANCE.mind", // 沿用原始 target 檔名，未更改
     uiScanning: false,
