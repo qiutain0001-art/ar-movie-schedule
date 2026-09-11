@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>圖書館電影播映節目表 - WebAR</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #000;
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+  }
+  #app { width: 100%; height: 100%; position: relative; }
+
+  #startScreen {
+    position: fixed; inset: 0; z-index: 50;
+    background: linear-gradient(160deg,#0b0b0f,#1a1a22);
+    color: #fff; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 24px; gap: 18px;
+  }
+  #startScreen h1 { font-size: 22px; margin: 0; letter-spacing: 1px; }
+  #startScreen p { font-size: 14px; opacity: .75; margin: 0; max-width: 320px; line-height: 1.6; }
+  #startBtn {
+    margin-top: 8px; padding: 14px 36px; font-size: 16px; font-weight: 600;
+    border-radius: 999px; border: none; color: #111;
+    background: #ffd53d; cursor: pointer;
+  }
+  #startBtn:active { transform: scale(0.97); }
+
+  #scanHint {
+    position: fixed; top: 18px; left: 0; right: 0; z-index: 40;
+    text-align: center; color: #fff; font-size: 14px;
+    text-shadow: 0 1px 4px rgba(0,0,0,.8);
+    pointer-events: none; transition: opacity .3s;
+  }
+  #scanHint .badge {
+    display: inline-block; background: rgba(0,0,0,.55);
+    padding: 8px 16px; border-radius: 999px;
+  }
+
+  #loading {
+    position: fixed; inset: 0; z-index: 45; display: none;
+    align-items: center; justify-content: center; color: #fff;
+    background: rgba(0,0,0,.6); font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<div id="startScreen">
+  <h1>📽️ 電影播映節目表 AR</h1>
+  <p>請將鏡頭對準視聽區的宣傳海報，即可看到本月播映片單動態浮現。<br/>需要相機權限才能開始。</p>
+  <button id="startBtn">開始掃描</button>
+</div>
+
+<div id="scanHint" style="display:none;">
+  <span class="badge">🔍 請對準海報 / 目標圖像</span>
+</div>
+
+<div id="loading"><span>載入中…</span></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { MindARThree } from "mindar-image-three";
+
+const chromaKeyVertexShader = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const chromaKeyFragmentShader = `
+  precision highp float;
+  uniform sampler2D map;
+  uniform vec3 keyColor;
+  uniform float similarity;
+  uniform float smoothness;
+  uniform float spill;
+  varying vec2 vUv;
+
+  vec2 RGBtoUV(vec3 rgb) {
+    return vec2(
+      rgb.r * -0.169 - rgb.g * 0.331 + rgb.b * 0.5    + 0.5,
+      rgb.r *  0.5   - rgb.g * 0.419 - rgb.b * 0.081  + 0.5
+    );
+  }
+
+  void main() {
+    vec4 tex = texture2D(map, vUv);
+    vec2 chromaUV = RGBtoUV(tex.rgb);
+    vec2 keyUV    = RGBtoUV(keyColor);
+    float d = distance(chromaUV, keyUV);
+
+    float alpha = smoothstep(similarity, similarity + smoothness, d);
+
+    float maxrb = max(tex.r, tex.b);
+    vec3 color = tex.rgb;
+    float g = min(color.g, mix(color.g, maxrb, spill));
+    color.g = g;
+
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+function createChromaKeyMaterial(videoTexture) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: videoTexture },
+      keyColor: { value: new THREE.Color(0x00ff00) },
+      similarity: { value: 0.28 },
+      smoothness: { value: 0.10 },
+      spill: { value: 0.6 },
+    },
+    vertexShader: chromaKeyVertexShader,
+    fragmentShader: chromaKeyFragmentShader,
+    transparent: true,
+    side: THREE.DoubleSide,
+  });
+}
+
+const startScreen = document.getElementById("startScreen");
+const startBtn = document.getElementById("startBtn");
+const scanHint = document.getElementById("scanHint");
+const loadingEl = document.getElementById("loading");
+
+let mindarThree, video, renderer, scene, camera, anchor, plane;
+let started = false;
+
+async function initAR() {
+  loadingEl.style.display = "flex";
+
+  mindarThree = new MindARThree({
+    container: document.querySelector("#app"),
+    imageTargetSrc: "./AUDIO_ENTRANCE.mind",
+    uiScanning: false,
+    uiLoading: false,
+  });
+
+  ({ renderer, scene, camera } = mindarThree);
+
+  anchor = mindarThree.addAnchor(0);
+
+  video = document.createElement("video");
+  video.src = "./cinema-rolling-carousel.mp4";
+  video.crossOrigin = "anonymous";
+  video.loop = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.setAttribute("webkit-playsinline", "true");
+
+  const videoTexture = new THREE.VideoTexture(video);
+  videoTexture.minFilter = THREE.LinearFilter;
+  videoTexture.magFilter = THREE.LinearFilter;
+  videoTexture.format = THREE.RGBAFormat;
+
+  const material = createChromaKeyMaterial(videoTexture);
+
+  const aspect = 1080 / 1920;
+  const planeHeight = 1.4;
+  const planeWidth = planeHeight * aspect;
+  const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
+
+  plane = new THREE.Mesh(geometry, material);
+  plane.position.set(0, planeHeight / 2 - 0.05, 0);
+  anchor.group.add(plane);
+
+  anchor.onTargetFound = () => {
+    scanHint.style.display = "none";
+    video.currentTime = 0;
+    video.play().catch(() => {});
+  };
+  anchor.onTargetLost = () => {
+    scanHint.style.display = "block";
+    video.pause();
+  };
+
+  await mindarThree.start();
+  loadingEl.style.display = "none";
+  scanHint.style.display = "block";
+
+  renderer.setAnimationLoop(() => {
+    if (video.readyState >= video.HAVE_CURRENT_DATA) {
+      videoTexture.needsUpdate = true;
+    }
+    renderer.render(scene, camera);
+  });
+}
+
+startBtn.addEventListener("click", async () => {
+  if (started) return;
+  started = true;
+  startScreen.style.display = "none";
+  try {
+    await initAR();
+  } catch (err) {
+    console.error(err);
+    alert("啟動相機失敗，請確認已允許相機權限，並使用 https 或 localhost 開啟本頁。\n" + err.message);
+    startScreen.style.display = "flex";
+    started = false;
+  }
+});
+</script>
+</body>
+</html>
