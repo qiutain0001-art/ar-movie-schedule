@@ -190,7 +190,7 @@ async function initAR() {
   debugLog("② 建立 MindARThree 物件…");
   mindarThree = new MindARThree({
     container: document.querySelector("#app"),
-    imageTargetSrc: "./assets/AUDIO_ENTRANCE.mind", // 沿用原始 target 檔名，未更改
+    imageTargetSrc: "./AUDIO_ENTRANCE.mind", // 沿用原始 target 檔名，未更改
     uiScanning: false,
     uiLoading: false,
   });
@@ -203,7 +203,7 @@ async function initAR() {
 
   // 影片素材（綠幕）
   video = document.createElement("video");
-  video.src = "./assets/cinema-rolling-carousel.mp4"; // 沿用原始檔名，未更改
+  video.src = "./cinema-rolling-carousel.mp4"; // 沿用原始檔名，未更改
   video.crossOrigin = "anonymous";
   video.loop = true;
   video.muted = true;               // 手機瀏覽器自動播放限制，靜音才可自動播
