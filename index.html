@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>圖書館電影播映節目表 - WebAR</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #000;
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+  }
+  #app { width: 100%; height: 100%; position: relative; }
+
+  /* 啟動畫面 */
+  #startScreen {
+    position: fixed; inset: 0; z-index: 50;
+    background: linear-gradient(160deg,#0b0b0f,#1a1a22);
+    color: #fff; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 24px; gap: 18px;
+  }
+  #startScreen h1 { font-size: 22px; margin: 0; letter-spacing: 1px; }
+  #startScreen p { font-size: 14px; opacity: .75; margin: 0; max-width: 320px; line-height: 1.6; }
+  #startBtn {
+    margin-top: 8px; padding: 14px 36px; font-size: 16px; font-weight: 600;
+    border-radius: 999px; border: none; color: #111;
+    background: #ffd53d; cursor: pointer;
+  }
+  #startBtn:active { transform: scale(0.97); }
+
+  /* 掃描提示 */
+  #scanHint {
+    position: fixed; top: 18px; left: 0; right: 0; z-index: 40;
+    text-align: center; color: #fff; font-size: 14px;
+    text-shadow: 0 1px 4px rgba(0,0,0,.8);
+    pointer-events: none; transition: opacity .3s;
+  }
+  #scanHint .badge {
+    display: inline-block; background: rgba(0,0,0,.55);
+    padding: 8px 16px; border-radius: 999px;
+  }
+
+  #loading {
+    position: fixed; inset: 0; z-index: 45; display: none;
+    align-items: center; justify-content: center; color: #fff;
+    background: rgba(0,0,0,.6); font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<div id="startScreen">
+  <h1>📽️ 電影播映節目表 AR</h1>
+  <p>請將鏡頭對準視聽區的宣傳海報，即可看到本月播映片單動態浮現。<br/>需要相機權限才能開始。</p>
+  <button id="startBtn">開始掃描</button>
+</div>
+
+<div id="scanHint" style="display:none;">
+  <span class="badge">🔍 請對準海報 / 目標圖像</span>
+</div>
+
+<div id="loading"><span>載入中…</span></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<!-- MindAR image (three.js 版本) -->
+<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
+
+<script type="module">
+import * as THREE from "three";
+
+/* ---------------------------------------------------------
+   1) 綠幕去背 Shader（Chroma Key）
+   在 GPU 上即時把影片中的綠色背景轉成透明，
+   不需要事先把影片重新輸出成含 Alpha 的檔案。
+--------------------------------------------------------- */
+const chromaKeyVertexShader = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const chromaKeyFragmentShader = `
+  precision highp float;
+  uniform sampler2D map;
+  uniform vec3 keyColor;     // 要去除的綠幕顏色
+  uniform float similarity;  // 判定為背景的門檻（越大去除範圍越大）
+  uniform float smoothness;  // 邊緣柔化程度
+  uniform float spill;       // 綠色溢色抑制強度
+  varying vec2 vUv;
+
+  vec2 RGBtoUV(vec3 rgb) {
+    return vec2(
+      rgb.r * -0.169 - rgb.g * 0.331 + rgb.b * 0.5    + 0.5,
+      rgb.r *  0.5   - rgb.g * 0.419 - rgb.b * 0.081  + 0.5
+    );
+  }
+
+  void main() {
+    vec4 tex = texture2D(map, vUv);
+    vec2 chromaUV = RGBtoUV(tex.rgb);
+    vec2 keyUV    = RGBtoUV(keyColor);
+    float d = distance(chromaUV, keyUV);
+
+    float alpha = smoothstep(similarity, similarity + smoothness, d);
+
+    // 抑制邊緣殘留的綠色溢色
+    float maxrb = max(tex.r, tex.b);
+    vec3 color = tex.rgb;
+    float g = min(color.g, mix(color.g, maxrb, spill));
+    color.g = g;
+
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+function createChromaKeyMaterial(videoTexture) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: videoTexture },
+      keyColor: { value: new THREE.Color(0x00ff00) },
+      similarity: { value: 0.28 },   // 可依實際綠幕微調 0.2~0.4
+      smoothness: { value: 0.10 },
+      spill: { value: 0.6 },
+    },
+    vertexShader: chromaKeyVertexShader,
+    fragmentShader: chromaKeyFragmentShader,
+    transparent: true,
+    side: THREE.DoubleSide,
+  });
+}
+
+/* ---------------------------------------------------------
+   2) 建立 MindAR 場景
+--------------------------------------------------------- */
+const startScreen = document.getElementById("startScreen");
+const startBtn = document.getElementById("startBtn");
+const scanHint = document.getElementById("scanHint");
+const loadingEl = document.getElementById("loading");
+
+let mindarThree, video, renderer, scene, camera, anchor, plane;
+let started = false;
+
+async function initAR() {
+  loadingEl.style.display = "flex";
+
+  mindarThree = new window.MINDAR.IMAGE.MindARThree({
+    container: document.querySelector("#app"),
+    imageTargetSrc: "./assets/AUDIO_ENTRANCE.mind", // 沿用原始 target 檔名，未更改
+    uiScanning: false,
+    uiLoading: false,
+  });
+
+  ({ renderer, scene, camera } = mindarThree);
+
+  anchor = mindarThree.addAnchor(0); // 對應 .mind 內第 0 個目標圖像
+
+  // 影片素材（綠幕）
+  video = document.createElement("video");
+  video.src = "./assets/cinema-rolling-carousel.mp4"; // 沿用原始檔名，未更改
+  video.crossOrigin = "anonymous";
+  video.loop = true;
+  video.muted = true;               // 手機瀏覽器自動播放限制，靜音才可自動播
+  video.playsInline = true;
+  video.setAttribute("webkit-playsinline", "true");
+
+  const videoTexture = new THREE.VideoTexture(video);
+  videoTexture.minFilter = THREE.LinearFilter;
+  videoTexture.magFilter = THREE.LinearFilter;
+  videoTexture.format = THREE.RGBAFormat;
+
+  const material = createChromaKeyMaterial(videoTexture);
+
+  // 影片為 1080x1920 直式，依比例建立平面，寬度設為 1（單位＝目標圖像寬度）
+  const aspect = 1080 / 1920;
+  const planeHeight = 1.4;              // 可依海報大小調整
+  const planeWidth = planeHeight * aspect;
+  const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
+
+  plane = new THREE.Mesh(geometry, material);
+  plane.position.set(0, planeHeight / 2 - 0.05, 0); // 往上浮出海報上方
+  anchor.group.add(plane);
+
+  anchor.onTargetFound = () => {
+    scanHint.style.display = "none";
+    video.currentTime = 0;
+    video.play().catch(() => {});
+  };
+  anchor.onTargetLost = () => {
+    scanHint.style.display = "block";
+    video.pause();
+  };
+
+  await mindarThree.start();
+  loadingEl.style.display = "none";
+  scanHint.style.display = "block";
+
+  renderer.setAnimationLoop(() => {
+    if (video.readyState >= video.HAVE_CURRENT_DATA) {
+      videoTexture.needsUpdate = true;
+    }
+    renderer.render(scene, camera);
+  });
+}
+
+startBtn.addEventListener("click", async () => {
+  if (started) return;
+  started = true;
+  startScreen.style.display = "none";
+  try {
+    await initAR();
+  } catch (err) {
+    console.error(err);
+    alert("啟動相機失敗，請確認已允許相機權限，並使用 https 或 localhost 開啟本頁。\n" + err.message);
+    startScreen.style.display = "flex";
+    started = false;
+  }
+});
+</script>
+</body>
+</html>
